@@ -4,19 +4,40 @@ import math
 import os
 import queue
 import sys
+import threading
+import warnings
+import ctypes
 import tkinter as tk
 from tkinter import ttk, messagebox
 
 try:
     import numpy as np
-    import sounddevice as sd
+    import soundcard as sc
+    from soundcard import SoundcardRuntimeWarning
 except ImportError:
     np = None
-    sd = None
+    sc = None
+    SoundcardRuntimeWarning = RuntimeWarning
 
 APP_NAME = "Stereo Analog VU Meter"
 CONFIG_DIR = os.path.join(os.getenv("APPDATA", os.path.expanduser("~")), "StereoAnalogVUMeter")
 CONFIG_FILE = os.path.join(CONFIG_DIR, "settings.json")
+
+
+
+def resource_path(filename):
+    base = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
+    return os.path.join(base, filename)
+
+
+def set_windows_app_id():
+    if sys.platform == "win32":
+        try:
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(
+                "Eduardo.StereoAnalogVUMeter"
+            )
+        except Exception:
+            pass
 
 DEFAULT_CONFIG = {
     "geometry": "980x430+160+160",
@@ -213,38 +234,18 @@ class AudioSetupDialog(tk.Toplevel):
         content.pack(fill="both", expand=True, padx=22, pady=20)
 
         tk.Label(
-            content, text="Stereo input device",
+            content, text="Windows playback output",
             bg="#101010", fg="#d7c2e5", font=("Segoe UI", 10, "bold")
         ).pack(anchor="w")
 
+        self.current_device = current_device
         self.device_map = {}
-        device_names = []
-        if sd is not None:
-            try:
-                for idx, dev in enumerate(sd.query_devices()):
-                    if int(dev.get("max_input_channels", 0)) >= 2:
-                        name = f"{idx}: {dev['name']}"
-                        device_names.append(name)
-                        self.device_map[name] = idx
-            except Exception:
-                pass
-
-        self.device_var = tk.StringVar()
-        combo = ttk.Combobox(
+        self.device_var = tk.StringVar(value="Scanning Windows playback outputs...")
+        self.combo = ttk.Combobox(
             content, textvariable=self.device_var,
-            values=device_names, state="readonly", font=("Segoe UI", 10)
+            values=[], state="disabled", font=("Segoe UI", 10)
         )
-        combo.pack(fill="x", pady=(6, 18))
-
-        selected_name = None
-        for name, idx in self.device_map.items():
-            if idx == current_device:
-                selected_name = name
-                break
-        if selected_name:
-            self.device_var.set(selected_name)
-        elif device_names:
-            self.device_var.set(device_names[0])
+        self.combo.pack(fill="x", pady=(6, 18))
 
         row = tk.Frame(content, bg="#101010")
         row.pack(fill="x")
@@ -267,7 +268,7 @@ class AudioSetupDialog(tk.Toplevel):
 
         tk.Label(
             content,
-            text="Only devices with at least two input channels are listed.",
+            text="The meter captures audio playing through the selected output.",
             bg="#101010", fg="#75667d", font=("Segoe UI", 9)
         ).pack(anchor="w", pady=(18, 0))
 
@@ -286,6 +287,57 @@ class AudioSetupDialog(tk.Toplevel):
             cursor="hand2"
         ).pack(side="right", padx=(0, 10))
 
+        self.bind("<Escape>", lambda _e: self.destroy())
+        self.after_idle(self._show_dialog)
+        threading.Thread(target=self._scan_outputs, daemon=True).start()
+
+    def _show_dialog(self):
+        try:
+            self.deiconify()
+            self.lift()
+            self.attributes("-topmost", True)
+            self.focus_force()
+            self.after(250, lambda: self.attributes("-topmost", False) if self.winfo_exists() else None)
+        except tk.TclError:
+            pass
+
+    def _scan_outputs(self):
+        outputs = []
+        error = None
+        if sc is None:
+            error = "The soundcard package is not installed."
+        else:
+            try:
+                outputs = [(dev.name, dev.id) for dev in sc.all_speakers()]
+            except Exception as exc:
+                error = str(exc)
+        try:
+            self.after(0, lambda: self._finish_scan(outputs, error))
+        except tk.TclError:
+            pass
+
+    def _finish_scan(self, outputs, error):
+        if not self.winfo_exists():
+            return
+        self.device_map.clear()
+        names = []
+        for original_name, device_id in outputs:
+            name = original_name
+            if name in self.device_map:
+                name = f"{name} [{device_id}]"
+            names.append(name)
+            self.device_map[name] = device_id
+        self.combo.configure(values=names, state="readonly" if names else "disabled")
+        selected = next((n for n, i in self.device_map.items() if i == self.current_device), None)
+        if selected:
+            self.device_var.set(selected)
+        elif names:
+            self.device_var.set(names[0])
+        else:
+            self.device_var.set("No playback outputs found")
+            if error:
+                messagebox.showerror("Audio Setup", f"Could not list playback outputs.\n\n{error}", parent=self)
+
     def _drag_start(self, event):
         self._drag_x = event.x_root - self.winfo_x()
         self._drag_y = event.y_root - self.winfo_y()
@@ -296,7 +348,7 @@ class AudioSetupDialog(tk.Toplevel):
     def apply(self):
         name = self.device_var.get()
         if not name:
-            messagebox.showerror("Audio Setup", "No stereo input device is available.", parent=self)
+            messagebox.showerror("Audio Setup", "No Windows playback output is available.", parent=self)
             return
         self.on_apply(
             self.device_map[name],
@@ -317,9 +369,11 @@ class VUMeterApp(tk.Tk):
         self.minsize(self.MIN_W, self.MIN_H)
         self.overrideredirect(True)
         self.configure(bg="#080808")
+        self._setup_window_icon()
 
         self.audio_queue = queue.Queue(maxsize=8)
         self.stream = None
+        self.audio_thread = None
         self.device = self.config_data.get("device")
         self.samplerate = int(self.config_data.get("samplerate", 48000))
         self.blocksize = int(self.config_data.get("blocksize", 1024))
@@ -331,6 +385,7 @@ class VUMeterApp(tk.Tk):
 
         self.build_ui()
         self.protocol("WM_DELETE_WINDOW", self.close_app)
+        self.after(100, self._ensure_taskbar_icon)
         self.after(60, self.process_audio)
         self.after(200, self.start_audio)
 
@@ -353,12 +408,12 @@ class VUMeterApp(tk.Tk):
         title.pack(side="left", padx=15)
 
         self.status_var = tk.StringVar(value="AUDIO OFFLINE")
-        status = tk.Label(
+        self.status_label = tk.Label(
             titlebar, textvariable=self.status_var,
             bg="#141014", fg="#75667d",
             font=("Segoe UI", 9, "bold")
         )
-        status.pack(side="left", padx=(16, 0))
+        self.status_label.pack(side="left", padx=(16, 0))
 
         setup_btn = tk.Button(
             titlebar, text="SETUP", command=self.open_setup,
@@ -387,7 +442,7 @@ class VUMeterApp(tk.Tk):
         )
         min_btn.pack(side="right")
 
-        for widget in (titlebar, title, status):
+        for widget in (titlebar, title, self.status_label):
             widget.bind("<ButtonPress-1>", self.start_drag)
             widget.bind("<B1-Motion>", self.drag_window)
             widget.bind("<Double-Button-1>", self.toggle_maximize)
@@ -410,6 +465,33 @@ class VUMeterApp(tk.Tk):
         self.resize_grip.place(relx=1.0, rely=1.0, anchor="se", x=-3, y=-2)
         self.resize_grip.bind("<ButtonPress-1>", self.start_resize)
         self.resize_grip.bind("<B1-Motion>", self.resize_window)
+
+    def _setup_window_icon(self):
+        if sys.platform == "win32":
+            try:
+                self.iconbitmap(resource_path("Stereo_Analog_VU_Meter.ico"))
+            except Exception:
+                pass
+
+    def _ensure_taskbar_icon(self):
+        if sys.platform != "win32":
+            return
+        try:
+            self.update_idletasks()
+            hwnd = ctypes.windll.user32.GetParent(self.winfo_id())
+            if not hwnd:
+                hwnd = self.winfo_id()
+            GWL_EXSTYLE = -20
+            WS_EX_TOOLWINDOW = 0x00000080
+            WS_EX_APPWINDOW = 0x00040000
+            style = ctypes.windll.user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
+            style = (style & ~WS_EX_TOOLWINDOW) | WS_EX_APPWINDOW
+            ctypes.windll.user32.SetWindowLongW(hwnd, GWL_EXSTYLE, style)
+            ctypes.windll.user32.ShowWindow(hwnd, 0)
+            ctypes.windll.user32.ShowWindow(hwnd, 5)
+            self.lift()
+        except Exception:
+            pass
 
     def load_config(self):
         try:
@@ -478,10 +560,17 @@ class VUMeterApp(tk.Tk):
             self.unbind("<Map>")
 
     def open_setup(self):
-        AudioSetupDialog(
-            self, self.device, self.samplerate, self.blocksize,
-            self.apply_audio_settings
-        )
+        try:
+            if getattr(self, "setup_dialog", None) and self.setup_dialog.winfo_exists():
+                self.setup_dialog.lift()
+                self.setup_dialog.focus_force()
+                return
+            self.setup_dialog = AudioSetupDialog(
+                self, self.device, self.samplerate, self.blocksize,
+                self.apply_audio_settings
+            )
+        except Exception as exc:
+            messagebox.showerror("Audio Setup", f"Could not open Setup.\n\n{exc}", parent=self)
 
     def apply_audio_settings(self, device, samplerate, blocksize):
         self.device = device
@@ -490,72 +579,83 @@ class VUMeterApp(tk.Tk):
         self.save_config()
         self.start_audio()
 
+    def set_status(self, text, color):
+        self.status_var.set(text)
+        self.status_label.configure(fg=color)
+
     def stop_audio(self):
         self.running = False
-        if self.stream is not None:
-            try:
-                self.stream.stop()
-                self.stream.close()
-            except Exception:
-                pass
+        self.stream = None
+
+    def _resolve_speaker(self):
+        speakers = sc.all_speakers()
+        if self.device:
+            for speaker in speakers:
+                if speaker.id == self.device:
+                    return speaker
+        speaker = sc.default_speaker()
+        if speaker is not None:
+            self.device = speaker.id
+        return speaker
+
+    def _audio_worker(self, speaker):
+        try:
+            loopback = sc.get_microphone(speaker.id, include_loopback=True)
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", SoundcardRuntimeWarning)
+                with loopback.recorder(samplerate=self.samplerate, channels=2, blocksize=self.blocksize) as recorder:
+                    self.stream = recorder
+                    self.after(0, lambda: self.set_status(f"LIVE • {speaker.name}", "#7bd88f"))
+                    while self.running:
+                        data = recorder.record(numframes=self.blocksize)
+                        if data is None or len(data) == 0:
+                            continue
+                        if data.ndim == 1:
+                            data = np.column_stack((data, data))
+                        elif data.shape[1] == 1:
+                            data = np.repeat(data, 2, axis=1)
+                        rms = np.sqrt(np.mean(np.square(data[:, :2]), axis=0) + 1e-12)
+                        db = 20.0 * np.log10(rms)
+                        try:
+                            self.audio_queue.put_nowait((float(db[0]), float(db[1])))
+                        except queue.Full:
+                            try:
+                                self.audio_queue.get_nowait()
+                                self.audio_queue.put_nowait((float(db[0]), float(db[1])))
+                            except queue.Empty:
+                                pass
+        except Exception as exc:
+            self.running = False
+            self.after(0, lambda e=str(exc): self._show_audio_error(e))
+        finally:
             self.stream = None
+
+    def _show_audio_error(self, error):
+        self.set_status("AUDIO ERROR", "#ff5f71")
+        messagebox.showerror(
+            "Audio Error",
+            f"Could not capture the selected Windows playback output.\n\n{error}",
+            parent=self
+        )
 
     def start_audio(self):
         self.stop_audio()
-        if sd is None or np is None:
-            self.status_var.set("INSTALL DEPENDENCIES")
-            self.status_var.configure(fg="#ff5f71")
+        if sc is None or np is None:
+            self.set_status("INSTALL DEPENDENCIES", "#ff5f71")
             return
-
         try:
-            if self.device is None:
-                default_input = sd.default.device[0]
-                if default_input is not None and default_input >= 0:
-                    info = sd.query_devices(default_input)
-                    if int(info["max_input_channels"]) >= 2:
-                        self.device = int(default_input)
-
-            if self.device is None:
-                self.status_var.set("SELECT A STEREO INPUT")
-                self.status_var.configure(fg="#ff5f71")
+            speaker = self._resolve_speaker()
+            if speaker is None:
+                self.set_status("SELECT AUDIO OUTPUT", "#ff5f71")
                 return
-
-            def callback(indata, frames, time_info, status):
-                if status:
-                    pass
-                if indata.shape[1] < 2:
-                    return
-                rms = np.sqrt(np.mean(np.square(indata[:, :2]), axis=0) + 1e-12)
-                db = 20.0 * np.log10(rms)
-                try:
-                    self.audio_queue.put_nowait((float(db[0]), float(db[1])))
-                except queue.Full:
-                    try:
-                        self.audio_queue.get_nowait()
-                    except queue.Empty:
-                        pass
-
-            self.stream = sd.InputStream(
-                device=self.device,
-                channels=2,
-                samplerate=self.samplerate,
-                blocksize=self.blocksize,
-                dtype="float32",
-                callback=callback
-            )
-            self.stream.start()
             self.running = True
-            dev_name = sd.query_devices(self.device)["name"]
-            self.status_var.set(f"LIVE • {dev_name}")
-            self.status_var.configure(fg="#7bd88f")
-        except Exception as exc:
-            self.status_var.set("AUDIO ERROR")
-            self.status_var.configure(fg="#ff5f71")
-            messagebox.showerror(
-                "Audio Error",
-                f"Could not start the selected input device.\n\n{exc}",
-                parent=self
+            self.set_status("CONNECTING AUDIO...", "#d3a7ea")
+            self.audio_thread = threading.Thread(
+                target=self._audio_worker, args=(speaker,), daemon=True
             )
+            self.audio_thread.start()
+        except Exception as exc:
+            self._show_audio_error(str(exc))
 
     def process_audio(self):
         latest = None
@@ -583,6 +683,7 @@ class VUMeterApp(tk.Tk):
 
 
 def main():
+    set_windows_app_id()
     app = VUMeterApp()
     app.mainloop()
 

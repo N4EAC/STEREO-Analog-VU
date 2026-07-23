@@ -1,67 +1,38 @@
-# Stereo Analog VU Meter v1.0.1
+# Stereo Analog VU Meter v1.1.1
 
-A borderless Windows desktop application with two live stereo analog VU meters.
+Borderless Windows stereo VU meter that captures the audio currently playing through a selected Windows speaker or headphone output.
 
-## Features
+## Fixes in v1.1.1
 
-- Separate left and right analog VU meters
-- Black meter background
-- Red needles
-- Purple dB scale markings
-- Borderless custom window
-- Drag the custom title bar to move the application
-- Resize from the lower-right corner
-- Double-click the title bar to maximize or restore
-- Audio Setup dialog for selecting a Windows playback output
-- Remembers the last window size, position, audio device, sample rate, and block size
-- Live RMS audio metering
-
-## Requirements
-
-- Windows 10 or Windows 11
-- Python 3.10 or newer
-- A stereo audio input device or loopback/virtual audio cable
+- Rebuilt from the corrected source rather than the older defective package.
+- Replaced `sounddevice` endpoint handling with `soundcard` playback-loopback capture.
+- Setup lists Windows playback devices only.
+- Removed all invalid `StringVar.configure()` calls.
+- Missing or changed saved devices fall back to the current Windows default output.
+- Includes the application icon, EXE build script, and Inno Setup installer script.
 
 ## Run from source
 
-1. Install dependencies:
+1. Run `pip install -r requirements.txt`
+2. Run `python stereo_vu_meter.py`
+3. Open Setup and select the speaker/headphone output carrying the audio.
 
-   `pip install -r requirements.txt`
+## Build
 
-2. Start the application:
+Run `build_exe.bat`. Compile `Stereo_Analog_VU_Meter.iss` after the EXE appears in `dist`.
 
-   `python stereo_vu_meter.py`
 
-## Build a standalone EXE
+## Build note
 
-Run:
+Keep `Stereo_Analog_VU_Meter.ico` in the same folder as `build_exe.bat`,
+`requirements.txt`, and `stereo_vu_meter.py`. The corrected build script stops
+with `BUILD FAILED` when any build step fails.
 
-`build_exe.bat`
 
-The executable will be created in the `dist` folder.
+## Version 1.1.4 fixes
 
-## Audio routing
-
-To meter computer playback rather than a Windows playback output, select a Windows loopback-capable device, Stereo Mix, or a virtual audio cable in Setup.
-
-## v1.0.1 fixes
-
-- Audio discovery and device opening now run outside the UI thread.
-- Setup opens immediately even if a Windows audio driver is slow or unresponsive.
-- Window dragging remains responsive while audio initializes.
-- Close exits immediately without waiting for an audio driver to release.
-- Setup is raised and focused reliably above the main window.
-
-## Version 1.0.2
-
-- Prevents an indefinite CONNECTING AUDIO status.
-- Adds a five-second audio connection timeout.
-- Prompts for audio selection instead of opening an unknown default device.
-
-## Version 1.0.3
-
-Corrected status-label color updates when applying audio settings.
-
-## Version 1.1
-
-Audio capture now uses Windows WASAPI loopback. Setup lists playback outputs only, including speakers, headphones, HDMI, and USB audio devices.
+- Setup opens immediately and stays visible above the main window.
+- Playback-output enumeration runs in the background so Setup cannot appear frozen.
+- The main borderless window is given a real Windows taskbar entry.
+- A unique Windows AppUserModelID and runtime window icon are applied.
+- The build script now bundles the ICO inside the one-file executable.
