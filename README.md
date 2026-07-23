@@ -1,6 +1,7 @@
 # Stereo Analog VU Meter v1.1.1
 
 Borderless Windows stereo VU meter that captures the audio currently playing through a selected Windows speaker or headphone output.
+<img width="720" height="320" alt="image" src="https://github.com/user-attachments/assets/627129ab-573b-4732-8d29-011dcc8d2c2f" />
 
 ## Fixes in v1.1.1
 
